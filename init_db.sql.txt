@@ -1,0 +1,37 @@
+CREATE DATABASE klassenbuch;
+CREATE TABLE lernfeld (
+    lernfeld_id VARCHAR(10) PRIMARY KEY,      
+    titel VARCHAR(255) NOT NULL,
+    start_datum DATE,
+    end_datum DATE
+);
+
+CREATE TABLE dozent (
+    dozent_id SERIAL PRIMARY KEY,
+    vorname VARCHAR(50) NOT NULL,
+    nachname VARCHAR(50) NOT NULL
+);
+
+
+CREATE TABLE lernfeld_dozent (
+    lernfeld_id VARCHAR(10) REFERENCES lernfeld(lernfeld_id) ON DELETE CASCADE,
+    dozent_id INT REFERENCES dozent(dozent_id) ON DELETE CASCADE,
+    PRIMARY KEY (lernfeld_id, dozent_id)
+);
+
+CREATE TABLE lerntag (
+    lerntag_id SERIAL PRIMARY KEY,
+    datum DATE NOT NULL UNIQUE, 
+    lernfeld_id VARCHAR(10) REFERENCES lernfeld(lernfeld_id) ON DELETE SET NULL,
+    dozent_id INT REFERENCES dozent(dozent_id) ON DELETE SET NULL 
+);
+
+CREATE TABLE unterrichtseinheit (
+    einheit_id SERIAL PRIMARY KEY,
+    lerntag_id INT REFERENCES lerntag(lerntag_id) ON DELETE CASCADE,
+    stunde INT CHECK (stunde BETWEEN 1 AND 9), 
+    inhalt TEXT,
+    UNIQUE (lerntag_id, stunde) 
+);
+
+
