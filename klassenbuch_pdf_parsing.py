@@ -34,6 +34,7 @@ import sys
 import os
 import glob
 import argparse
+import tomllib
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -778,58 +779,122 @@ class PGConnector:
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config file loading
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_CONFIG = Path(__file__).parent / "config.toml"
+
+
+def load_config(path: Path) -> dict:
+    """Load a TOML config file; return {} if the file does not exist."""
+    if not path.exists():
+        return {}
+    with open(path, "rb") as fh:
+        return tomllib.load(fh)
+
+
+def collect_pdfs_from_config(cfg: dict) -> list[Path]:
+    """
+    Expand PDF sources from the [pdfs] config section:
+      pdfs.files   — explicit file paths
+      pdfs.paths   — directories scanned recursively with pdfs.pattern
+    """
+    pdfs_cfg = cfg.get("pdfs", {})
+    pattern  = pdfs_cfg.get("pattern", "MI-*.pdf")
+    result: list[Path] = []
+
+    for f in pdfs_cfg.get("files", []):
+        p = Path(f)
+        if p.exists():
+            result.append(p)
+        else:
+            print(f"WARNING (config): file not found — {f}", file=sys.stderr)
+
+    for d in pdfs_cfg.get("paths", []):
+        dp = Path(d)
+        if dp.is_dir():
+            found = sorted(dp.rglob(pattern))
+            if not found:
+                print(f"WARNING (config): no '{pattern}' files in {d}", file=sys.stderr)
+            result.extend(found)
+        else:
+            print(f"WARNING (config): directory not found — {d}", file=sys.stderr)
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=textwrap.dedent("""\
-            Themendokumentation PDF → PostgreSQL tool
+        description=textwrap.dedent("""            Themendokumentation PDF → PostgreSQL tool
+
+            Settings are read from config.toml (next to this script).
+            CLI flags always override config file values.
+
+            Precedence:  CLI flags  >  config.toml  >  PG* environment variables
 
             Examples
             ────────
-            # Print SQL only
-            python pdf_to_sql.py *.pdf
+            # Print SQL for all PDFs listed in config
+            python pdf_to_sql.py --dry-run
 
-            # Insert into DB
-            python pdf_to_sql.py --db-host localhost --db-name mydb \\
-                                 --db-user postgres --db-password secret *.pdf
+            # Insert PDFs listed in config into DB
+            python pdf_to_sql.py
 
-            # Check permissions for a user
-            python pdf_to_sql.py --db-host localhost --db-name mydb \\
-                                 --db-user postgres --check-permissions --grant-to myuser
+            # Insert specific PDFs (overrides config [pdfs] section)
+            python pdf_to_sql.py file1.pdf file2.pdf
 
-            # Fix permissions (connect as superuser, grant to app user)
-            python pdf_to_sql.py --db-host localhost --db-name mydb \\
-                                 --db-user postgres --fix-permissions --grant-to myappuser
+            # Use a different config file
+            python pdf_to_sql.py --config /path/to/other.toml
 
-            # Interactive query shell
-            python pdf_to_sql.py --db-host localhost --db-name mydb \\
-                                 --db-user postgres --query
+            # Override a DB param at runtime
+            python pdf_to_sql.py --db-password secret
 
-            # Insert PDFs then drop into shell
-            python pdf_to_sql.py --db-host localhost --db-name mydb \\
-                                 --db-user postgres --query *.pdf
+            # Check / fix permissions for an app user
+            python pdf_to_sql.py --check-permissions --grant-to myuser
+            python pdf_to_sql.py --fix-permissions   --grant-to myuser
+
+            # Interactive SQL shell
+            python pdf_to_sql.py --query
         """),
     )
-    db = p.add_argument_group("Database connection (falls back to PG* env vars)")
-    db.add_argument("--db-host",     default=os.getenv("PGHOST",     "localhost"))
-    db.add_argument("--db-port",     default=os.getenv("PGPORT",     "5432"), type=int)
-    db.add_argument("--db-name",     default=os.getenv("PGDATABASE", ""))
-    db.add_argument("--db-user",     default=os.getenv("PGUSER",     ""))
-    db.add_argument("--db-password", default=os.getenv("PGPASSWORD", ""))
+
+    p.add_argument(
+        "--config", "-c", metavar="FILE",
+        default=str(DEFAULT_CONFIG),
+        help=f"Path to TOML config file (default: config.toml next to script)",
+    )
+
+    db = p.add_argument_group(
+        "Database connection",
+        "Override config.toml [database] section. Falls back to PG* env vars.",
+    )
+    db.add_argument("--db-host",     default=None, metavar="HOST")
+    db.add_argument("--db-port",     default=None, metavar="PORT", type=int)
+    db.add_argument("--db-name",     default=None, metavar="DBNAME")
+    db.add_argument("--db-user",     default=None, metavar="USER")
+    db.add_argument("--db-password", default=None, metavar="PASSWORD")
 
     pm = p.add_argument_group("Permission management")
     pm.add_argument("--check-permissions", action="store_true",
-                    help="Show privilege report for --grant-to user, then exit")
+                    help="Print privilege report for --grant-to user, then exit")
     pm.add_argument("--fix-permissions",   action="store_true",
-                    help="GRANT INSERT/SELECT on all schema tables to --grant-to user")
-    pm.add_argument("--grant-to", metavar="USERNAME",
+                    help="GRANT INSERT/SELECT on all tables to --grant-to user")
+    pm.add_argument("--grant-to", metavar="USERNAME", default=None,
                     help="Target DB user for --check-permissions / --fix-permissions")
 
     p.add_argument("--query",   "-q", action="store_true",
                    help="Open interactive SQL shell after processing PDFs")
     p.add_argument("--dry-run",       action="store_true",
-                   help="Print SQL to stdout instead of executing (even if DB flags set)")
-    p.add_argument("pdfs", nargs="*", help="PDF file paths (globs supported)")
+                   help="Print SQL to stdout, never write to DB")
+    p.add_argument("pdfs", nargs="*",
+                   help="PDF files/globs — overrides config [pdfs] section when given")
     return p
 
 
@@ -842,47 +907,82 @@ def resolve_pdfs(raw_args: list[str]) -> list[Path]:
 
 
 def main():
-    parser    = build_arg_parser()
-    args      = parser.parse_args()
-    pdf_paths = resolve_pdfs(args.pdfs)
+    parser = build_arg_parser()
+    args   = parser.parse_args()
 
-    needs_db = args.db_name and not args.dry_run and (
-        pdf_paths or args.query or args.check_permissions or args.fix_permissions
+    # ── Load config file ──────────────────────────────────────────────────
+    cfg_path = Path(args.config)
+    cfg      = load_config(cfg_path)
+    if cfg:
+        print(f"Config: {cfg_path}", file=sys.stderr)
+    else:
+        print(f"No config at {cfg_path} — using CLI / env-var defaults.", file=sys.stderr)
+
+    db_cfg   = cfg.get("database", {})
+    mode_cfg = cfg.get("mode", {})
+
+    # ── DB params: CLI flag > config > env var ────────────────────────────
+    db_host     = args.db_host     or db_cfg.get("host",     os.getenv("PGHOST",     "localhost"))
+    db_port     = args.db_port     or db_cfg.get("port",     int(os.getenv("PGPORT", "5432")))
+    db_name     = args.db_name     or db_cfg.get("name",     os.getenv("PGDATABASE", ""))
+    db_user     = args.db_user     or db_cfg.get("user",     os.getenv("PGUSER",     ""))
+    db_password = args.db_password or db_cfg.get("password", os.getenv("PGPASSWORD", ""))
+
+    # ── Mode flags: CLI flag > config ─────────────────────────────────────
+    dry_run           = args.dry_run           or bool(mode_cfg.get("dry_run",           False))
+    do_query          = args.query             or bool(mode_cfg.get("query_shell",        False))
+    check_permissions = args.check_permissions or bool(mode_cfg.get("check_permissions", False))
+    fix_permissions   = args.fix_permissions   or bool(mode_cfg.get("fix_permissions",   False))
+    grant_to          = args.grant_to          or mode_cfg.get("grant_to", "")
+
+    # ── PDF list: CLI args override config entirely ───────────────────────
+    if args.pdfs:
+        pdf_paths = resolve_pdfs(args.pdfs)
+        print(f"PDFs from CLI: {len(pdf_paths)} file(s)", file=sys.stderr)
+    else:
+        pdf_paths = collect_pdfs_from_config(cfg)
+        if pdf_paths:
+            print(f"PDFs from config: {len(pdf_paths)} file(s)", file=sys.stderr)
+
+    # ── Connect ───────────────────────────────────────────────────────────
+    needs_db = db_name and not dry_run and (
+        pdf_paths or do_query or check_permissions or fix_permissions
     )
-
     connector = None
     if needs_db:
         connector = PGConnector(
-            host=args.db_host, port=args.db_port,
-            dbname=args.db_name, user=args.db_user, password=args.db_password,
+            host=db_host, port=db_port,
+            dbname=db_name, user=db_user, password=db_password,
         )
 
     # ── Permission check / fix ────────────────────────────────────────────
-    if args.check_permissions:
+    if check_permissions:
         if not connector:
-            print("ERROR: --check-permissions requires --db-name.")
+            print("ERROR: --check-permissions requires a DB connection "
+                  "(set [database] name in config or --db-name).", file=sys.stderr)
             sys.exit(1)
-        connector.check_permissions_for(args.grant_to or args.db_user)
-        if not args.fix_permissions and not pdf_paths and not args.query:
+        connector.check_permissions_for(grant_to or db_user)
+        if not fix_permissions and not pdf_paths and not do_query:
             connector.close(); return
 
-    if args.fix_permissions:
+    if fix_permissions:
         if not connector:
-            print("ERROR: --fix-permissions requires --db-name.")
+            print("ERROR: --fix-permissions requires a DB connection.", file=sys.stderr)
             sys.exit(1)
-        if not args.grant_to:
-            print("ERROR: --fix-permissions requires --grant-to <username>.")
+        if not grant_to:
+            print("ERROR: --fix-permissions requires --grant-to <username> "
+                  "or mode.grant_to in config.", file=sys.stderr)
             sys.exit(1)
-        if not connector.fix_permissions(args.grant_to):
+        if not connector.fix_permissions(grant_to):
             connector.close(); sys.exit(1)
-        if not pdf_paths and not args.query:
+        if not pdf_paths and not do_query:
             connector.close(); return
 
     # ── Process PDFs ──────────────────────────────────────────────────────
-    use_db     = connector is not None and not args.dry_run
-    db_cache   = make_db_cache()   # shared across all PDFs in this run
+    use_db      = connector is not None and not dry_run
+    db_cache    = make_db_cache()
     print_state = PrintState()
-    all_statements = []
+    all_statements: list[str] = []
 
     for path in pdf_paths:
         if not path.exists():
@@ -891,26 +991,22 @@ def main():
         print(f"Processing: {path.name}", file=sys.stderr)
         try:
             pdf_data = extract_pdf(str(path))
-
             if use_db:
-                # DB path: no manual IDs, SERIAL + RETURNING handles everything
                 affected = connector.execute_pdf(pdf_data, db_cache,
                                                  source_label=path.name)
-                print(f"  ✓ {affected} rows affected.", file=sys.stderr)
+                print(f"  \u2713 {affected} rows affected.", file=sys.stderr)
             else:
-                # Print path: self-contained SQL with explicit IDs from 1
                 stmts = build_print_statements(pdf_data, print_state)
                 all_statements.append(f"-- Source: {path.name}")
                 all_statements.extend(stmts)
                 all_statements.append("")
-
         except PermissionError as e:
-            print(f"\n  ✗ PERMISSION ERROR in {path.name}:\n{e}\n", file=sys.stderr)
+            print(f"\n  \u2717 PERMISSION ERROR in {path.name}:\n{e}\n", file=sys.stderr)
         except Exception as e:
             print(f"  ERROR in {path.name}: {e}", file=sys.stderr)
 
-    # ── Print mode output ─────────────────────────────────────────────────
-    if not connector or args.dry_run:
+    # ── Print / dry-run output ────────────────────────────────────────────
+    if not use_db:
         if all_statements:
             print("\n".join([
                 "-- Auto-generated by pdf_to_sql.py",
@@ -919,13 +1015,14 @@ def main():
                 *all_statements,
                 "COMMIT;",
             ]))
-        elif not args.query and not args.check_permissions and not args.fix_permissions:
-            print("Nothing to do.", file=sys.stderr)
+        elif not do_query and not check_permissions and not fix_permissions:
+            print("Nothing to do.  Add PDFs via CLI args or config [pdfs] section.",
+                  file=sys.stderr)
 
     # ── Interactive shell ─────────────────────────────────────────────────
-    if args.query:
+    if do_query:
         if not connector:
-            print("ERROR: --query requires --db-name.", file=sys.stderr)
+            print("ERROR: --query requires a DB connection.", file=sys.stderr)
             sys.exit(1)
         connector.interactive_shell()
 

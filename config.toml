@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# pdf_to_sql  —  configuration file
+#
+# CLI flags always override values set here.
+# Environment variables (PGHOST, PGDATABASE, …) are the lowest-priority
+# fallback; config file sits between env-vars and CLI flags in precedence.
+#
+# Precedence (highest → lowest):
+#   CLI flags  >  config.toml  >  PG* environment variables
+# ─────────────────────────────────────────────────────────────────────────────
+
+[database]
+host     = "localhost"
+port     = 5432
+name     = ""           # required for DB mode, e.g. "themendoku"
+user     = ""           # e.g. "postgres"
+password = ""           # leave empty to be prompted at runtime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF sources
+#
+# List files and/or directories.  Directories are scanned recursively for
+# files whose names match `pattern`.
+#
+# Examples:
+#   paths = ["/data/pdfs", "C:/Users/Me/Documents/PDFs", "./uploads"]
+#   files = ["./extra/special.pdf"]
+# ─────────────────────────────────────────────────────────────────────────────
+
+[pdfs]
+paths   = []            # directories to scan (recursively)
+files   = []            # individual PDF files
+pattern = "MI-*.pdf"    # glob pattern used when scanning directories
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Behaviour / mode defaults
+#
+# These are the default values when the corresponding CLI flag is NOT given.
+# Setting dry_run = true here is equivalent to always passing --dry-run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[mode]
+dry_run           = false   # true  → print SQL only, never write to DB
+query_shell       = false   # true  → open interactive SQL shell after processing
+check_permissions = false   # true  → print permission report and exit
+fix_permissions   = false   # true  → GRANT privileges to grant_to user
+grant_to          = ""      # DB username for check/fix-permissions

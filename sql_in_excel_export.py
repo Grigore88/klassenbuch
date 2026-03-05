@@ -6,10 +6,19 @@ Uses the original template as a base for pixel-perfect formatting.
 from __future__ import annotations
 import os
 import shutil
+import getpass
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from collections import defaultdict
 from typing import Optional
+
+try:
+    import tomllib          # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # pip install tomli
+    except ModuleNotFoundError:
+        tomllib = None       # falls back gracefully
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -102,20 +111,90 @@ class Lerntag:
 
 
 # ─────────────────────────────────────────────────────────
-# Database
+# Database – config loader
+# Precedence (highest → lowest):
+#   CLI / explicit kwarg  >  config.toml  >  PG* environment variables
 # ─────────────────────────────────────────────────────────
 
-DB_CONFIG = {
-   "host":      "localhost",
-    "port":     5432,
-    "dbname":   "klassenbuch",
-    "user":     "postgres",
-    "password": "1",
-}
+def _find_config() -> str | None:
+    """Look for config.toml next to the script, then in the working directory."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml"),
+        os.path.join(os.getcwd(), "config.toml"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
 
 
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
+def _load_config(config_path: str | None = None) -> dict:
+    """
+    Load [database] section from config.toml.
+    Returns an empty dict if tomllib is unavailable or file not found.
+    """
+    if tomllib is None:
+        return {}
+    path = config_path or _find_config()
+    if not path:
+        return {}
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        return data.get("database", {})
+    except Exception as e:
+        print(f"⚠️  Could not read config.toml: {e}")
+        return {}
+
+
+def build_db_config(config_path: str | None = None, **overrides) -> dict:
+    """
+    Assemble the psycopg2 connection dict using the three-tier precedence:
+      overrides  >  config.toml [database]  >  PG* environment variables
+
+    Parameters
+    ----------
+    config_path : explicit path to config.toml  (optional)
+    **overrides : any key from the dict below, e.g. host='myserver'
+    """
+    toml_cfg = _load_config(config_path)
+
+    cfg = {
+        "host":     overrides.get("host")
+                    or toml_cfg.get("host")
+                    or os.getenv("PGHOST", "localhost"),
+        "port":     int(overrides.get("port")
+                    or toml_cfg.get("port")
+                    or os.getenv("PGPORT", 5432)),
+        "dbname":   overrides.get("dbname")
+                    or toml_cfg.get("name")       # config.toml uses "name"
+                    or os.getenv("PGDATABASE", "klassenbuch"),
+        "user":     overrides.get("user")
+                    or toml_cfg.get("user")
+                    or os.getenv("PGUSER", "postgres"),
+        "password": overrides.get("password")
+                    or toml_cfg.get("password")
+                    or os.getenv("PGPASSWORD", ""),
+    }
+
+    # If password is still empty, prompt interactively (never store blank credentials)
+    if not cfg["password"]:
+        try:
+            cfg["password"] = getpass.getpass(
+                f"Password for {cfg['user']}@{cfg['host']}/{cfg['dbname']}: "
+            )
+        except (EOFError, KeyboardInterrupt):
+            cfg["password"] = ""   # non-interactive environment, leave blank
+
+    return cfg
+
+
+# Module-level default built once at import time
+DB_CONFIG = build_db_config()
+
+
+def get_connection(db_config: dict | None = None):
+    return psycopg2.connect(**(db_config or DB_CONFIG))
 
 
 def fetch_all() -> list[Lerntag]:
@@ -236,11 +315,11 @@ def _fill_sheet(ws, week_lerntage, kw_number, kw_year, report_nr) -> None:
         days=-jan4.weekday()
     )
     week_fri = week_mon + timedelta(days=4)
-    date_range = f"Woche vom {week_mon.strftime('%d.%m.%Y')} bis {week_fri.strftime('%d.%m.%Y')}"
+    date_range = f"{week_mon.strftime('%d.%m.')} \u2013 {week_fri.strftime('%d.%m.%Y')}"
 
     # H1 (merged H:J): date range on line 1, LF title on line 2
     lf_part  = f"\n{lf_sample.lernfeld_id} – {lf_sample.titel}" if lf_sample else ""
-    h1_value = date_range + lf_part #
+    h1_value = date_range + lf_part
 
     # ── Fill header ───────────────────────────────────────
     ws.cell(row=1, column=4).value = f"Nr. {report_nr}"          # D1:E1
